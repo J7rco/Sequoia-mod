@@ -23,6 +23,7 @@ import org.sequoia.seq.config.ConfigManager;
 import org.sequoia.seq.managers.BombShareManager;
 import org.sequoia.seq.managers.PartyFinderManager;
 import org.sequoia.seq.managers.PartyListing;
+import org.sequoia.seq.managers.WynnPartyScoreboardReader;
 import org.sequoia.seq.model.Activity;
 import org.sequoia.seq.model.Listing;
 import org.sequoia.seq.model.PartyRole;
@@ -126,9 +127,13 @@ public class SeqCommand {
                                 .then(ClientCommandManager.literal("list")
                                                 .executes(SeqCommand::runPartyList))
                                 .then(ClientCommandManager.literal("status")
-                                                .executes(SeqCommand::runPartyStatus))
+                                                 .executes(SeqCommand::runPartyStatus))
+                                .then(ClientCommandManager.literal("hp")
+                                                .executes(SeqCommand::runPartyHp))
+                                .then(ClientCommandManager.literal("hp-debug")
+                                                .executes(SeqCommand::runPartyHpDebug))
                                 .then(ClientCommandManager.literal("create")
-                                                .then(ClientCommandManager.argument(
+                                                 .then(ClientCommandManager.argument(
                                                                 "activities",
                                                                 StringArgumentType.greedyString())
                                                                 .suggests(SeqCommand::suggestActivities)
@@ -338,6 +343,36 @@ public class SeqCommand {
                                                         ? "You are the party leader."
                                                         : "You are a party member.");
                 });
+                return 1;
+        }
+
+        private static int runPartyHp(CommandContext<FabricClientCommandSource> ctx) {
+                List<WynnPartyScoreboardReader.PartyHealth> members = WynnPartyScoreboardReader.readPartyHealth();
+                if (members.isEmpty()) {
+                        sendFeedback(ctx.getSource(), "No Wynn party HP found. Try /seq p hp-debug to inspect sidebar text.");
+                        return 0;
+                }
+
+                sendFeedback(ctx.getSource(), "Wynn party HP from scoreboard:");
+                for (WynnPartyScoreboardReader.PartyHealth member : members) {
+                        sendFeedback(
+                                        ctx.getSource(),
+                                        member.name() + " | HP: " + member.hp() + " | Level: " + member.level());
+                }
+                return 1;
+        }
+
+        private static int runPartyHpDebug(CommandContext<FabricClientCommandSource> ctx) {
+                List<String> lines = WynnPartyScoreboardReader.readSidebarLines();
+                if (lines.isEmpty()) {
+                        sendFeedback(ctx.getSource(), "No sidebar scoreboard lines found.");
+                        return 0;
+                }
+
+                sendFeedback(ctx.getSource(), "Sidebar lines read by Sequoia:");
+                for (int i = 0; i < lines.size(); i++) {
+                        sendFeedback(ctx.getSource(), (i + 1) + ": " + lines.get(i));
+                }
                 return 1;
         }
 
