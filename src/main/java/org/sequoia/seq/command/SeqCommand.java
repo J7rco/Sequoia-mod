@@ -21,6 +21,7 @@ import org.sequoia.seq.accessors.NotificationAccessor;
 import org.sequoia.seq.client.SeqClient;
 import org.sequoia.seq.config.ConfigManager;
 import org.sequoia.seq.managers.BombShareManager;
+import org.sequoia.seq.managers.PartyHealthCache;
 import org.sequoia.seq.managers.PartyFinderManager;
 import org.sequoia.seq.managers.PartyListing;
 import org.sequoia.seq.managers.WynnPartyScoreboardReader;
@@ -129,9 +130,11 @@ public class SeqCommand {
                                 .then(ClientCommandManager.literal("status")
                                                  .executes(SeqCommand::runPartyStatus))
                                 .then(ClientCommandManager.literal("hp")
-                                                .executes(SeqCommand::runPartyHp))
+                                                 .executes(SeqCommand::runPartyHp))
                                 .then(ClientCommandManager.literal("hp-debug")
-                                                .executes(SeqCommand::runPartyHpDebug))
+                                                 .executes(SeqCommand::runPartyHpDebug))
+                                .then(ClientCommandManager.literal("hp-render-debug")
+                                                .executes(SeqCommand::runPartyHpRenderDebug))
                                 .then(ClientCommandManager.literal("create")
                                                  .then(ClientCommandManager.argument(
                                                                 "activities",
@@ -355,9 +358,20 @@ public class SeqCommand {
 
                 sendFeedback(ctx.getSource(), "Wynn party HP from scoreboard:");
                 for (WynnPartyScoreboardReader.PartyHealth member : members) {
+                        String username = member.username() != null ? member.username() : "unknown username";
                         sendFeedback(
                                         ctx.getSource(),
-                                        member.name() + " | HP: " + member.hp() + " | Level: " + member.level());
+                                        member.nickname()
+                                                        + " -> "
+                                                        + username
+                                                        + " | HP: "
+                                                        + member.hp()
+                                                        + " | Level: "
+                                                        + member.level()
+                                                        + " | Online: "
+                                                        + member.online()
+                                                        + " | Alive: "
+                                                        + member.alive());
                 }
                 return 1;
         }
@@ -372,6 +386,41 @@ public class SeqCommand {
                 sendFeedback(ctx.getSource(), "Sidebar lines read by Sequoia:");
                 for (int i = 0; i < lines.size(); i++) {
                         sendFeedback(ctx.getSource(), (i + 1) + ": " + lines.get(i));
+                }
+                return 1;
+        }
+
+        private static int runPartyHpRenderDebug(CommandContext<FabricClientCommandSource> ctx) {
+                List<PartyHealthCache.VisiblePlayerHealthDebug> players = PartyHealthCache.visiblePlayerDebug();
+                if (players.isEmpty()) {
+                        sendFeedback(ctx.getSource(), "No visible players found for HP render debug.");
+                        return 0;
+                }
+
+                sendFeedback(ctx.getSource(), "Visible player HP render debug:");
+                for (PartyHealthCache.VisiblePlayerHealthDebug player : players) {
+                        String health = player.health()
+                                        .map(value -> value.nickname()
+                                                        + " -> "
+                                                        + value.username()
+                                                        + " "
+                                                        + value.hp()
+                                                        + "/"
+                                                        + value.maxHp())
+                                        .orElse("no cached party HP");
+                        sendFeedback(
+                                        ctx.getSource(),
+                                        player.name()
+                                                        + " | profile="
+                                                        + player.profileName()
+                                                        + " | scoreboard="
+                                                        + player.scoreboardName()
+                                                        + " | custom="
+                                                        + player.customName()
+                                                        + " | percent="
+                                                        + player.percent()
+                                                        + " | "
+                                                        + health);
                 }
                 return 1;
         }

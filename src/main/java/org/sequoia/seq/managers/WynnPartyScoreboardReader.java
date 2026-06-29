@@ -3,19 +3,19 @@ package org.sequoia.seq.managers;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import net.minecraft.ChatFormatting;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.player.AbstractClientPlayer;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.TextColor;
 import net.minecraft.world.scores.DisplaySlot;
 import net.minecraft.world.scores.Objective;
 import net.minecraft.world.scores.PlayerScoreEntry;
 import net.minecraft.world.scores.Scoreboard;
-
-import org.sequoia.seq.utils.PacketTextNormalizer;
 
 public final class WynnPartyScoreboardReader {
     /*
@@ -27,59 +27,50 @@ public final class WynnPartyScoreboardReader {
      * Wynncraft can leave custom formatting/separator characters around the HP
      * number, so the HP section intentionally allows non-digit noise around it.
      *
-     * Group 1 = HP number
-     * Group 2 = player name
-     * Group 3 = level
+     * The parser below intentionally does not use one full-line regex because
+     * Wynncraft can inject custom separator glyphs around the HP number.
      */
-    private static final Pattern PARTY_LINE =
-            Pattern.compile("^[-\\s]*\\D*(\\d+)\\D+(.+?)\\s+\\[(\\d+)]$");
+    private static final Pattern FIRST_NUMBER = Pattern.compile("(\\d+)");
+    private static final Pattern BRACKETED_NUMBER = Pattern.compile("\\[(\\d+)]");
 
     private WynnPartyScoreboardReader() {}
 
-    public record PartyHealth(String name, int hp, int level) {}
+    public record PartyHealth(String nickname, String username, int hp, int level, boolean online, boolean alive) {}
+
+    private record SidebarLine(String text, PacketNameResolver resolver) {}
 
     public static List<String> readSidebarLines() {
+        List<String> lines = new ArrayList<>();
+        for (SidebarLine line : readSidebarLineComponents()) {
+            lines.add(line.text());
+        }
+
+        return lines;
+    }
+
+    private static List<SidebarLine> readSidebarLineComponents() {
         Minecraft mc = Minecraft.getInstance();
 
-        // No world loaded, so there is no scoreboard to read.
         if (mc.level == null) {
             return List.of();
         }
 
-        // This is the client-side scoreboard sent by the server.
         Scoreboard scoreboard = mc.level.getScoreboard();
-
-        // Wynncraft displays the visible sidebar using the SIDEBAR display slot.
         Objective sidebar = scoreboard.getDisplayObjective(DisplaySlot.SIDEBAR);
 
-        // If the sidebar is hidden or not loaded yet, there is nothing to parse.
         if (sidebar == null) {
             return List.of();
         }
 
-        // Get all score rows shown for this sidebar objective.
         List<PlayerScoreEntry> entries = new ArrayList<>(scoreboard.listPlayerScores(sidebar));
-
-        /*
-         * Scoreboards are ordered by score value.
-         * Higher scores usually appear higher on the sidebar.
-         */
         entries.sort(Comparator.comparingInt(PlayerScoreEntry::value).reversed());
 
-        List<String> lines = new ArrayList<>();
+        List<SidebarLine> lines = new ArrayList<>();
         for (PlayerScoreEntry entry : entries) {
-            /*
-             * entry.display() is the formatted text the server wants shown.
-             * If it is null, fall back to entry.owner().
-             */
             Component display = entry.display();
-            String rawLine = display != null ? display.getString() : entry.owner();
-
-            /*
-             * Wynncraft scoreboard text can contain formatting/private-use symbols.
-             * This helper cleans it into easier text for parsing.
-             */
-            lines.add(PacketTextNormalizer.normalizeForParsing(rawLine));
+            Component lineComponent = display != null ? display : Component.literal(entry.owner());
+            PacketNameResolver resolver = PacketNameResolver.from(lineComponent);
+            lines.add(new SidebarLine(resolver.text(), resolver));
         }
 
         return lines;
@@ -87,65 +78,255 @@ public final class WynnPartyScoreboardReader {
 
     public static List<PartyHealth> readPartyHealth() {
         List<PartyHealth> partyHealth = new ArrayList<>();
-
-        /*
-         * We only want lines inside:
-         *
-         * Party:
-         * - [hp] name [level]
-         * - [hp] name [level]
-         *
-         * Raid:
-         *
-         * So this flag becomes true after "Party:" and false after "Raid:".
-         */
         boolean inPartySection = false;
 
-        for (String line : readSidebarLines()) {
-            // Start reading party member lines after the Party header.
-            if (line.startsWith("Party:")) {
-                inPartySection = true;
+        for (SidebarLine sidebarLine : readSidebarLineComponents()) {
+            String line = sidebarLine.text();
+            String trimmedLine = line.trim();
+
+            if (isHeaderLine(trimmedLine)) {
+                inPartySection = isPartyHeaderLine(trimmedLine);
                 continue;
             }
 
-            // Stop reading party member lines once the next scoreboard section starts.
-            if (line.startsWith("Raid:")) {
-                inPartySection = false;
+            int trimOffset = line.indexOf(trimmedLine);
+            ParsedPartyLine parsed = parsePartyLine(trimmedLine, inPartySection);
+            if (parsed == null) {
                 continue;
             }
 
-            // Ignore normal scoreboard lines until we are inside the Party section.
-            if (!inPartySection) {
-                continue;
+            boolean alive = parsed.online()
+                    && !sidebarLine.resolver().hasStrikethrough(
+                            trimOffset + parsed.nicknameStart(),
+                            trimOffset + parsed.nicknameEnd());
+            boolean nicknameStyle = sidebarLine.resolver().hasItalic(
+                    trimOffset + parsed.nicknameStart(),
+                    trimOffset + parsed.nicknameEnd());
+
+            String username = sidebarLine.resolver().resolveMetadataUsername(
+                    trimOffset + parsed.nicknameStart(),
+                    trimOffset + parsed.nicknameEnd());
+            if (username != null) {
+                org.sequoia.seq.client.SeqClient.LOGGER.debug(
+                        "[WynnPartyScoreboard] Metadata resolved nickname='{}' username='{}' line='{}'",
+                        parsed.nickname(),
+                        username,
+                        line);
+                NicknameResolverCache.remember(parsed.nickname(), username);
+            } else {
+                org.sequoia.seq.client.SeqClient.LOGGER.debug(
+                        "[WynnPartyScoreboard] Metadata missing nickname='{}' line='{}'; trying nickname cache",
+                        parsed.nickname(),
+                        line);
+                username = NicknameResolverCache.resolveUsername(parsed.nickname());
+                if (username == null && !nicknameStyle) {
+                    username = resolveVisiblePlayerUsername(parsed.nickname());
+                    if (username != null) {
+                        org.sequoia.seq.client.SeqClient.LOGGER.debug(
+                                "[WynnPartyScoreboard] Visible player resolved non-nick name='{}' username='{}' line='{}'",
+                                parsed.nickname(),
+                                username,
+                                line);
+                        NicknameResolverCache.remember(parsed.nickname(), username);
+                    } else {
+                        username = parsed.nickname();
+                    }
+                }
             }
 
-            // Try to parse a party member line.
-            Matcher matcher = PARTY_LINE.matcher(line);
-
-            // If the line is not a party HP line, ignore it.
-            if (!matcher.matches()) {
-                continue;
+            if (username != null && !nicknameStyle) {
+                String fullVisibleUsername = resolveVisiblePlayerUsername(username);
+                if (fullVisibleUsername == null) {
+                    fullVisibleUsername = resolveVisiblePlayerUsername(parsed.nickname());
+                }
+                if (fullVisibleUsername != null && !fullVisibleUsername.equals(username)) {
+                    org.sequoia.seq.client.SeqClient.LOGGER.debug(
+                            "[WynnPartyScoreboard] Canonicalized non-nick name='{}' username='{}' fullUsername='{}' line='{}'",
+                            parsed.nickname(),
+                            username,
+                            fullVisibleUsername,
+                            line);
+                    username = fullVisibleUsername;
+                    NicknameResolverCache.remember(parsed.nickname(), username);
+                }
             }
 
-            int hp = Integer.parseInt(matcher.group(1));
-            String name = matcher.group(2).trim();
-            int level = Integer.parseInt(matcher.group(3));
+            org.sequoia.seq.client.SeqClient.LOGGER.debug(
+                    "[WynnPartyScoreboard] Parsed nickname='{}' username='{}' hp={} level={} online={} alive={} italic={} line='{}'",
+                    parsed.nickname(),
+                    username,
+                    parsed.hp(),
+                    parsed.level(),
+                    parsed.online(),
+                    alive,
+                    nicknameStyle,
+                    line);
 
-            partyHealth.add(new PartyHealth(name, hp, level));
+            partyHealth.add(new PartyHealth(
+                    parsed.nickname(),
+                    username,
+                    parsed.hp(),
+                    parsed.level(),
+                    parsed.online(),
+                    alive));
         }
 
         return partyHealth;
     }
+
+    private static boolean isHeaderLine(String line) {
+        return line.contains("Party:") || line.contains("Raid:");
+    }
+
+    private static boolean isPartyHeaderLine(String line) {
+        return line.contains("Party:");
+    }
+
+    private static ParsedPartyLine parsePartyLine(String line, boolean allowOfflineLine) {
+        if (line == null || line.isBlank()) {
+            return null;
+        }
+
+        ParsedPartyLine onlineLine = parseOnlinePartyLine(line);
+        if (onlineLine != null) {
+            return onlineLine;
+        }
+
+        return allowOfflineLine ? parseOfflinePartyLine(line) : null;
+    }
+
+    private static ParsedPartyLine parseOnlinePartyLine(String line) {
+        Matcher hpMatcher = FIRST_NUMBER.matcher(line);
+        if (!hpMatcher.find()) {
+            return null;
+        }
+
+        BracketedNumber level = lastBracketedNumber(line);
+        if (level == null) {
+            return null;
+        }
+
+        int nicknameStart = hpMatcher.end();
+        while (nicknameStart < level.start() && !isNicknameCharacter(line.charAt(nicknameStart))) {
+            nicknameStart++;
+        }
+
+        int nicknameEnd = level.start();
+        while (nicknameEnd > nicknameStart && !isNicknameCharacter(line.charAt(nicknameEnd - 1))) {
+            nicknameEnd--;
+        }
+
+        if (nicknameStart >= nicknameEnd) {
+            return null;
+        }
+
+        String nickname = line.substring(nicknameStart, nicknameEnd).trim();
+        if (nickname.isBlank()) {
+            return null;
+        }
+
+        return new ParsedPartyLine(
+                Integer.parseInt(hpMatcher.group(1)),
+                nickname,
+                nicknameStart,
+                nicknameEnd,
+                level.value(),
+                true);
+    }
+
+    private static ParsedPartyLine parseOfflinePartyLine(String line) {
+        if (!line.startsWith("-")) {
+            return null;
+        }
+
+        if (lastBracketedNumber(line) != null) {
+            return null;
+        }
+
+        int nicknameStart = 1;
+        while (nicknameStart < line.length() && !isNicknameCharacter(line.charAt(nicknameStart))) {
+            nicknameStart++;
+        }
+
+        int nicknameEnd = line.length();
+        while (nicknameEnd > nicknameStart && !isNicknameCharacter(line.charAt(nicknameEnd - 1))) {
+            nicknameEnd--;
+        }
+
+        if (nicknameStart >= nicknameEnd) {
+            return null;
+        }
+
+        String nickname = line.substring(nicknameStart, nicknameEnd).trim();
+        if (nickname.isBlank()) {
+            return null;
+        }
+
+        return new ParsedPartyLine(0, nickname, nicknameStart, nicknameEnd, 0, false);
+    }
+
+    private static BracketedNumber lastBracketedNumber(String line) {
+        Matcher matcher = BRACKETED_NUMBER.matcher(line);
+        BracketedNumber lastMatch = null;
+        while (matcher.find()) {
+            lastMatch = new BracketedNumber(Integer.parseInt(matcher.group(1)), matcher.start(), matcher.end());
+        }
+        return lastMatch;
+    }
+
+    private static boolean isNicknameCharacter(char value) {
+        return Character.isLetterOrDigit(value) || value == '_' || Character.isWhitespace(value);
+    }
+
+    private static String resolveVisiblePlayerUsername(String nickname) {
+        String key = nickname == null ? "" : nickname.trim().toLowerCase(Locale.ROOT);
+        if (key.length() < 3) {
+            return null;
+        }
+
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null) {
+            return null;
+        }
+
+        String uniquePrefixMatch = null;
+        for (AbstractClientPlayer player : mc.level.players()) {
+            String username = player.getName().getString();
+            if (username.isBlank()) {
+                continue;
+            }
+
+            String usernameKey = username.toLowerCase(Locale.ROOT);
+            if (usernameKey.equals(key)) {
+                return username;
+            }
+
+            if (usernameKey.startsWith(key)) {
+                if (uniquePrefixMatch != null && !uniquePrefixMatch.equalsIgnoreCase(username)) {
+                    return null;
+                }
+                uniquePrefixMatch = username;
+            }
+        }
+
+        return uniquePrefixMatch;
+    }
+
+    private record ParsedPartyLine(
+            int hp,
+            String nickname,
+            int nicknameStart,
+            int nicknameEnd,
+            int level,
+            boolean online) {}
+
+    private record BracketedNumber(int value, int start, int end) {}
 
     public static String extractRedText(Component component) {
         if (component == null) {
             return "";
         }
 
-        /*
-         * This gets Minecraft's normal RED text color.
-         * The HP numbers in your screenshot are red.
-         */
         TextColor red = TextColor.fromLegacyFormat(ChatFormatting.RED);
 
         StringBuilder redText = new StringBuilder();

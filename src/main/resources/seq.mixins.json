@@ -8,7 +8,10 @@
   ],
   "client": [
     "AbstractContainerScreenMixin",
+    "AvatarRendererMixin",
     "ClientPacketListenerMixin",
+    "EntityRendererMixin",
+    "EntityRenderStateMixin",
     "GameRendererMixin",
     "InGameHudMixin",
     "TitleScreenMixin"

@@ -28,6 +28,7 @@ import org.sequoia.seq.managers.GameManager;
 import org.sequoia.seq.managers.GuildStorageTracker;
 import org.sequoia.seq.managers.GuildWarTrackerHandle;
 import org.sequoia.seq.managers.GuildWarTrackers;
+import org.sequoia.seq.managers.PartyHealthCache;
 import org.sequoia.seq.managers.PartyFinderManager;
 import org.sequoia.seq.managers.WynnPartySyncManager;
 import org.sequoia.seq.model.WynnClassType;
@@ -209,6 +210,7 @@ public class SeqClient implements ClientModInitializer {
             if (wynnPartySyncManager != null) {
                 wynnPartySyncManager.tick();
             }
+            PartyHealthCache.tick();
             if (guildWarTracker != null) {
                 guildWarTracker.tick();
             }

@@ -364,10 +364,12 @@ public class WynnPartySyncManager {
 
         String resolved = ChatManager.resolvePacketUsername(message, trimmed);
         if (resolved != null && MC_USERNAME_PATTERN.matcher(resolved).matches()) {
+            NicknameResolverCache.remember(trimmed, resolved);
             return resolved;
         }
 
         if (MC_USERNAME_PATTERN.matcher(trimmed).matches()) {
+            NicknameResolverCache.remember(trimmed, trimmed);
             return trimmed;
         }
         SeqClient.LOGGER.warn(

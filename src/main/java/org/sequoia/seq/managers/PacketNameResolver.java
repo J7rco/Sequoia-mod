@@ -48,16 +48,24 @@ final class PacketNameResolver {
             return metadata.firstHoverRealName();
         }
 
+        if (metadata.firstInsertionName() != null) {
+            return metadata.firstInsertionName();
+        }
+
         String displayedUsername = validUsername(trimmed);
         if (displayedUsername != null) {
             return displayedUsername;
         }
 
-        if (metadata.firstInsertionName() != null) {
-            return metadata.firstInsertionName();
-        }
-
         return null;
+    }
+
+    String resolveMetadataUsername(int startInclusive, int endExclusive) {
+        NameMetadata metadata = metadataForRange(startInclusive, endExclusive);
+        if (metadata.firstHoverRealName() != null) {
+            return metadata.firstHoverRealName();
+        }
+        return metadata.firstInsertionName();
     }
 
     private NameMetadata metadataForRange(int startInclusive, int endExclusive) {
@@ -94,9 +102,16 @@ final class PacketNameResolver {
             int codePoint = text.codePointAt(index);
             index += Character.charCount(codePoint);
 
+            if (codePoint == '\u00A7') {
+                if (index < text.length()) {
+                    index += Character.charCount(text.codePointAt(index));
+                }
+                continue;
+            }
+
             if (Character.isWhitespace(codePoint) || isIgnorableForParsing(codePoint)) {
                 if (!previousWasSpace) {
-                    target.add(new MetaChar(' ', hoverRealName, insertionName));
+                    target.add(new MetaChar(' ', hoverRealName, insertionName, style.isStrikethrough(), style.isItalic()));
                     previousWasSpace = true;
                 }
                 continue;
@@ -104,7 +119,12 @@ final class PacketNameResolver {
 
             String value = new String(Character.toChars(codePoint));
             for (int charIndex = 0; charIndex < value.length(); charIndex++) {
-                target.add(new MetaChar(value.charAt(charIndex), hoverRealName, insertionName));
+                target.add(new MetaChar(
+                        value.charAt(charIndex),
+                        hoverRealName,
+                        insertionName,
+                        style.isStrikethrough(),
+                        style.isItalic()));
             }
             previousWasSpace = false;
         }
@@ -140,7 +160,34 @@ final class PacketNameResolver {
         return builder.toString();
     }
 
-    private record MetaChar(char value, String hoverRealName, String insertionName) {}
+    boolean hasStrikethrough(int startInclusive, int endExclusive) {
+        int cappedStart = Math.max(0, startInclusive);
+        int cappedEnd = Math.min(endExclusive, characters.size());
+        for (int index = cappedStart; index < cappedEnd; index++) {
+            if (characters.get(index).strikethrough()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    boolean hasItalic(int startInclusive, int endExclusive) {
+        int cappedStart = Math.max(0, startInclusive);
+        int cappedEnd = Math.min(endExclusive, characters.size());
+        for (int index = cappedStart; index < cappedEnd; index++) {
+            if (characters.get(index).italic()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private record MetaChar(
+            char value,
+            String hoverRealName,
+            String insertionName,
+            boolean strikethrough,
+            boolean italic) {}
 
     private record NameMetadata(List<String> hoverRealNames, List<String> insertionNames) {
         private String firstHoverRealName() {
